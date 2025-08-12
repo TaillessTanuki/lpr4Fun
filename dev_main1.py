@@ -4,11 +4,15 @@ import numpy as np
 from ultralytics import YOLO
 from typo import correct_prefix, extract_plate_core
 from color_plate import detect_plate_type
+from fast_plate_ocr import LicensePlateRecognizer
+from cv2 import dnn_superres
 
 
-image_path = "platmobil15.jpg"
+image_path = "lprimage1.png"
 image_downloaded = "downloaded.jpg"
+image_downloaded_2 = "downloaded2.jpg"
 plate_detector = YOLO('license_plate_detector.pt')
+fpo_lpr = LicensePlateRecognizer('cct-xs-v1-global-model')
 
 # Detect license plate
 license_plates = plate_detector(image_path)[0]
@@ -25,6 +29,15 @@ image_array = cv2.imread(image_path)
 license_plate_cropped = image_array[int(y1):int(y2), int(x1):int(x2), :]
 cv2.imwrite(image_downloaded, license_plate_cropped)
 
+# x4 resolution
+plate = license_plate_cropped.copy()
+sr = dnn_superres.DnnSuperResImpl_create()
+sr.readModel('EDSR_x4.pb')
+sr.setModel('edsr', 4)
+license_plate_cropped = sr.upsample(plate)
+cv2.imwrite(image_downloaded_2, license_plate_cropped)
+
+
 # If the plate is red or not
 
 plate_type = detect_plate_type(license_plate_cropped)
@@ -36,15 +49,44 @@ if plate_type == 'red':
     _, thresh = cv2.threshold(gray, 180, 255,
                           cv2.THRESH_BINARY_INV)
     license_plate_cropped = thresh.copy()
+else:
+    img = license_plate_cropped.copy()
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    denoised = cv2.bilateralFilter(enhanced, d=11, sigmaColor=17, sigmaSpace=17)
+    thresh = cv2.adaptiveThreshold(
+        denoised, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        blockSize=11,
+        C=2
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    clean = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # === convert mask → 3-channel + correct size ===
+    # 4a) back to BGR
+    mask_bgr = cv2.cvtColor(clean, cv2.COLOR_GRAY2BGR)
 
+    # 4b) resize to (width=128, height=64)
+    #     note: cv2.resize takes (w, h)
+    plate_for_ocr = cv2.resize(mask_bgr, (128, 64),
+                               interpolation=cv2.INTER_CUBIC)
+
+    # 4c) BGR → RGB
+    plate_for_ocr = cv2.cvtColor(plate_for_ocr, cv2.COLOR_BGR2RGB)
+    license_plate_cropped = plate_for_ocr.copy()
 
 # Read license plate
 ocr = easyocr.Reader(["en"])
 results = ocr.readtext(license_plate_cropped, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
 
+
 if not results:
     print("No result")
     exit()
+
+
 
 
 print(f"result: {results}")
@@ -146,5 +188,11 @@ corrected_license_plate_first_height = correct_prefix(upper_text_first_height)
 print(f"license first_height correct prefix {corrected_license_plate_first_height}")
 extract_corrected_license_plate_first_height = extract_plate_core(corrected_license_plate_first_height)
 print(f"final license first_height {extract_corrected_license_plate_first_height}")
+
+# Using only x4 upscalling
+print(f"using only x4 upscalling: {results}")
+
+
+
 
 
